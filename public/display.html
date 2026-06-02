@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Photo Wall Display</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      background: #000;
+      overflow: hidden;
+    }
+
+    /* Each slide */
+    .slide {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      transition: opacity 0.8s ease;
+      pointer-events: none;
+    }
+    .slide.active { opacity: 1; z-index: 1; }
+    .slide.prev   { opacity: 0; z-index: 0; }
+
+    .slide img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain; /* contain keeps full photo; change to cover for crop-fill */
+    }
+
+    /* Subtle vignette */
+    .slide::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.55) 100%);
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    /* Overlay: name + count */
+    .overlay {
+      position: absolute;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 3;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      pointer-events: none;
+    }
+    .overlay-name {
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(6px);
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: clamp(1rem, 2.5vw, 1.5rem);
+      font-weight: 600;
+      padding: 6px 18px;
+      border-radius: 999px;
+      white-space: nowrap;
+      max-width: 80vw;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .overlay-count {
+      color: rgba(255,255,255,0.4);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: clamp(0.7rem, 1.5vw, 1rem);
+      letter-spacing: 0.05em;
+    }
+
+    /* Empty state */
+    #empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      color: rgba(255,255,255,0.2);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      gap: 12px;
+      text-align: center;
+    }
+    #empty span { font-size: 4rem; }
+    #empty p { font-size: 1.2rem; }
+  </style>
+</head>
+<body>
+
+<div id="empty">
+  <span>📸</span>
+  <p>Waiting for approved photos…</p>
+</div>
+
+<div id="stage"></div>
+
+<script>
+  const stage = document.getElementById('stage');
+  const emptyEl = document.getElementById('empty');
+
+  let photos = [];
+  let currentIndex = 0;
+  let slideInterval = 7000;
+  let timer = null;
+  let ws = null;
+  let reconnectTimer = null;
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+  function buildSlide(photo) {
+    const slide = document.createElement('div');
+    slide.className = 'slide';
+    slide.dataset.id = photo.id;
+    const name = photo.name || '';
+    const caption = photo.caption || '';
+    const label = caption ? `${name ? name + ' — ' : ''}${caption}` : name;
+    slide.innerHTML = `
+      <img src="/uploads/${photo.filename}" alt="">
+      <div class="overlay">
+        ${label ? `<div class="overlay-name">${esc(label)}</div>` : ''}
+        <div class="overlay-count" id="count-display"></div>
+      </div>`;
+    return slide;
+  }
+
+  function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  function rebuildStage() {
+    // Preserve current index within bounds
+    currentIndex = Math.min(currentIndex, Math.max(0, photos.length - 1));
+    // Clear
+    stage.innerHTML = '';
+    photos.forEach((p, i) => {
+      const s = buildSlide(p);
+      if (i === currentIndex) s.classList.add('active');
+      stage.appendChild(s);
+    });
+    updateCountLabel();
+  }
+
+  function updateCountLabel() {
+    document.querySelectorAll('.overlay-count').forEach(el => {
+      el.textContent = photos.length > 1 ? `${currentIndex + 1} / ${photos.length}` : '';
+    });
+  }
+
+  function showSlide(index) {
+    const slides = stage.querySelectorAll('.slide');
+    if (!slides.length) return;
+    slides.forEach(s => { s.classList.remove('active', 'prev'); });
+    const next = slides[index];
+    if (next) next.classList.add('active');
+    updateCountLabel();
+  }
+
+  function advance() {
+    if (!photos.length) return;
+    currentIndex = (currentIndex + 1) % photos.length;
+    showSlide(currentIndex);
+  }
+
+  function startTimer() {
+    if (timer) clearInterval(timer);
+    if (photos.length > 1) timer = setInterval(advance, slideInterval);
+  }
+
+  function updateDisplay() {
+    if (!photos.length) {
+      emptyEl.style.display = 'flex';
+      if (timer) clearInterval(timer);
+    } else {
+      emptyEl.style.display = 'none';
+      rebuildStage();
+      startTimer();
+    }
+  }
+
+  // ── WebSocket ───────────────────────────────────────────────────────────────
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}`);
+
+    ws.onmessage = e => {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === 'init') {
+        photos = msg.photos || [];
+        slideInterval = msg.slideInterval || 7000;
+        updateDisplay();
+        return;
+      }
+
+      if (msg.type === 'approved' && msg.photo) {
+        // Add new photo if not already present
+        if (!photos.find(p => p.id === msg.photo.id)) {
+          photos.push(msg.photo);
+          // Append slide to stage
+          const slide = buildSlide(msg.photo);
+          stage.appendChild(slide);
+          if (photos.length === 1) {
+            emptyEl.style.display = 'none';
+            showSlide(0);
+            startTimer();
+          }
+          updateCountLabel();
+        }
+        return;
+      }
+
+      if (msg.type === 'removed' || msg.type === 'rejected') {
+        const id = msg.id;
+        photos = photos.filter(p => p.id !== id);
+        // Remove slide DOM element
+        const el = stage.querySelector(`[data-id="${id}"]`);
+        if (el) el.remove();
+        if (photos.length === 0) {
+          emptyEl.style.display = 'flex';
+          if (timer) clearInterval(timer);
+        } else {
+          currentIndex = currentIndex % photos.length;
+          showSlide(currentIndex);
+          startTimer();
+          updateCountLabel();
+        }
+        return;
+      }
+    };
+
+    ws.onclose = () => {
+      reconnectTimer = setTimeout(connect, 3000);
+    };
+
+    ws.onerror = () => ws.close();
+  }
+
+  // ── Init ────────────────────────────────────────────────────────────────────
+  connect();
+</script>
+</body>
+</html>

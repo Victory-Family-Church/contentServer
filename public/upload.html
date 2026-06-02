@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>Share a Photo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f0f13;
+      --surface: #1c1c24;
+      --border: #2e2e3a;
+      --accent: #7c6fff;
+      --accent-dark: #5a4fe0;
+      --text: #e8e8f0;
+      --muted: #888898;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100svh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 24px 16px 48px;
+    }
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-bottom: 4px;
+      background: linear-gradient(135deg, #c4baff, #7c6fff);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-bottom: 28px;
+      text-align: center;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 24px;
+      width: 100%;
+      max-width: 460px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: 14px;
+      padding: 28px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+      overflow: hidden;
+    }
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(124,111,255,0.08);
+    }
+    .drop-zone input[type=file] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+    .drop-zone .icon { font-size: 2.4rem; display: block; margin-bottom: 8px; }
+    .drop-zone .hint { color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
+
+    #preview-wrap { display: none; position: relative; border-radius: 12px; overflow: hidden; }
+    #preview {
+      width: 100%; border-radius: 12px; display: block;
+      max-height: 260px; object-fit: cover;
+    }
+    #remove-preview {
+      position: absolute; top: 8px; right: 8px;
+      background: rgba(0,0,0,0.6); color: #fff;
+      border: none; border-radius: 50%; width: 30px; height: 30px;
+      font-size: 1rem; cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+
+    label { font-size: 0.82rem; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+    input[type=text], textarea {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      font-size: 1rem;
+      padding: 10px 14px;
+      width: 100%;
+      transition: border-color 0.2s;
+      font-family: inherit;
+    }
+    input[type=text]:focus, textarea:focus {
+      outline: none; border-color: var(--accent);
+    }
+    textarea { resize: vertical; min-height: 70px; }
+
+    .field { display: flex; flex-direction: column; gap: 6px; }
+
+    button[type=submit] {
+      background: var(--accent);
+      border: none;
+      border-radius: 12px;
+      color: #fff;
+      font-size: 1.05rem;
+      font-weight: 700;
+      padding: 14px;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+      width: 100%;
+      margin-top: 4px;
+    }
+    button[type=submit]:hover { background: var(--accent-dark); }
+    button[type=submit]:active { transform: scale(0.98); }
+    button[type=submit]:disabled { background: #555; cursor: not-allowed; }
+
+    #status { text-align: center; font-size: 0.9rem; min-height: 20px; color: var(--muted); }
+    #status.error { color: #ff6b6b; }
+
+    /* Success screen */
+    #success {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 32px 16px;
+      text-align: center;
+    }
+    #success .big-check { font-size: 4rem; }
+    #success h2 { font-size: 1.4rem; }
+    #success p { color: var(--muted); }
+    #upload-another {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px 20px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>📸 Share Your Photo</h1>
+  <p class="subtitle">Your photo may appear on the big screen!</p>
+
+  <div class="card" id="form-card">
+    <div class="drop-zone" id="drop-zone">
+      <input type="file" id="file-input" accept="image/*" capture="environment">
+      <span class="icon">🖼️</span>
+      <strong>Tap to choose or take a photo</strong>
+      <span class="hint">JPG, PNG, WEBP — max 10 MB</span>
+    </div>
+
+    <div id="preview-wrap">
+      <img id="preview" alt="Preview">
+      <button id="remove-preview" title="Remove">✕</button>
+    </div>
+
+    <div class="field">
+      <label for="name-input">Your name (optional)</label>
+      <input type="text" id="name-input" placeholder="e.g. Alex" maxlength="80" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="caption-input">Caption (optional)</label>
+      <textarea id="caption-input" placeholder="Say something…" maxlength="200"></textarea>
+    </div>
+
+    <div id="status"></div>
+    <button type="submit" id="submit-btn" disabled>Upload Photo</button>
+  </div>
+
+  <div class="card" id="success" style="max-width:460px;width:100%;">
+    <span class="big-check">🎉</span>
+    <h2>Thanks!</h2>
+    <p>Your photo is in the queue — it may appear on screen soon.</p>
+    <button id="upload-another">Upload another</button>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('file-input');
+    const dropZone  = document.getElementById('drop-zone');
+    const preview   = document.getElementById('preview');
+    const previewWrap = document.getElementById('preview-wrap');
+    const removeBtn = document.getElementById('remove-preview');
+    const submitBtn = document.getElementById('submit-btn');
+    const statusEl  = document.getElementById('status');
+    const formCard  = document.getElementById('form-card');
+    const successEl = document.getElementById('success');
+    const uploadAnotherBtn = document.getElementById('upload-another');
+
+    let selectedFile = null;
+
+    function setFile(file) {
+      if (!file || !file.type.startsWith('image/')) {
+        setStatus('Please choose an image file.', true);
+        return;
+      }
+      selectedFile = file;
+      const reader = new FileReader();
+      reader.onload = e => {
+        preview.src = e.target.result;
+        previewWrap.style.display = 'block';
+        dropZone.style.display = 'none';
+        submitBtn.disabled = false;
+        clearStatus();
+      };
+      reader.readAsDataURL(file);
+    }
+
+    fileInput.addEventListener('change', () => { if (fileInput.files[0]) setFile(fileInput.files[0]); });
+
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault(); dropZone.classList.remove('drag-over');
+      if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+    });
+
+    removeBtn.addEventListener('click', () => {
+      selectedFile = null;
+      fileInput.value = '';
+      previewWrap.style.display = 'none';
+      dropZone.style.display = '';
+      submitBtn.disabled = true;
+    });
+
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? 'error' : '';
+    }
+    function clearStatus() { statusEl.textContent = ''; statusEl.className = ''; }
+
+    submitBtn.addEventListener('click', async () => {
+      if (!selectedFile) return;
+      submitBtn.disabled = true;
+      setStatus('Uploading…');
+
+      const fd = new FormData();
+      fd.append('photo', selectedFile, selectedFile.name);
+      fd.append('name', document.getElementById('name-input').value.trim());
+      fd.append('caption', document.getElementById('caption-input').value.trim());
+
+      try {
+        const res = await fetch('/api/upload', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          formCard.style.display = 'none';
+          successEl.style.display = 'flex';
+        } else {
+          setStatus(data.error || 'Upload failed. Try again.', true);
+          submitBtn.disabled = false;
+        }
+      } catch (e) {
+        setStatus('Network error. Are you connected?', true);
+        submitBtn.disabled = false;
+      }
+    });
+
+    uploadAnotherBtn.addEventListener('click', () => {
+      selectedFile = null;
+      fileInput.value = '';
+      document.getElementById('name-input').value = '';
+      document.getElementById('caption-input').value = '';
+      previewWrap.style.display = 'none';
+      dropZone.style.display = '';
+      submitBtn.disabled = true;
+      clearStatus();
+      successEl.style.display = 'none';
+      formCard.style.display = '';
+    });
+  </script>
+</body>
+</html>

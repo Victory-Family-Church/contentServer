@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>contentServer — Moderator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f0f13;
+      --surface: #1c1c24;
+      --surface2: #25252f;
+      --border: #2e2e3a;
+      --accent: #7c6fff;
+      --green: #4caf7d;
+      --red: #e05555;
+      --text: #e8e8f0;
+      --muted: #888898;
+    }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+
+    /* ─── Login ─── */
+    #login-screen {
+      min-height: 100svh; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; padding: 24px;
+    }
+    #login-screen h1 { margin-bottom: 24px; }
+    #login-box { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 28px; width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 14px; }
+    #login-box input { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 1rem; padding: 10px 14px; width: 100%; }
+    #login-box input:focus { outline: none; border-color: var(--accent); }
+    #login-btn { background: var(--accent); border: none; border-radius: 10px; color: #fff; font-size: 1rem; font-weight: 700; padding: 12px; cursor: pointer; }
+    #login-btn:hover { filter: brightness(1.1); }
+    #login-error { color: #ff6b6b; font-size: 0.85rem; min-height: 18px; }
+
+    /* ─── App shell ─── */
+    #app { display: none; flex-direction: column; min-height: 100svh; }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 20px; background: var(--surface);
+      border-bottom: 1px solid var(--border); gap: 12px; flex-wrap: wrap;
+    }
+    header h1 { font-size: 1.1rem; }
+    .header-right { display: flex; align-items: center; gap: 10px; }
+    #qr-btn, #logout-btn {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); padding: 7px 14px;
+      font-size: 0.85rem; cursor: pointer;
+    }
+    #qr-btn:hover, #logout-btn:hover { border-color: var(--accent); }
+
+    .tabs { display: flex; border-bottom: 1px solid var(--border); }
+    .tab-btn {
+      flex: 1; padding: 13px; background: none; border: none;
+      color: var(--muted); font-size: 0.95rem; font-weight: 600; cursor: pointer;
+      border-bottom: 3px solid transparent; transition: all 0.15s;
+    }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .tab-btn .badge {
+      display: inline-block; background: var(--accent); color: #fff;
+      border-radius: 20px; font-size: 0.7rem; padding: 1px 7px; margin-left: 5px;
+    }
+
+    .tab-pane { display: none; padding: 16px; }
+    .tab-pane.active { display: block; }
+
+    /* ─── Photo grid ─── */
+    .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+
+    .photo-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+      overflow: hidden; display: flex; flex-direction: column;
+    }
+    .photo-card img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block; }
+    .photo-card .info { padding: 10px 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+    .photo-card .submitter { font-weight: 600; font-size: 0.9rem; }
+    .photo-card .caption-text { color: var(--muted); font-size: 0.82rem; }
+    .photo-card .time { color: var(--muted); font-size: 0.75rem; }
+    .photo-card .actions { padding: 0 12px 12px; display: flex; gap: 8px; }
+    .btn-approve { flex: 1; background: var(--green); border: none; border-radius: 8px; color: #fff; padding: 9px; font-weight: 700; cursor: pointer; font-size: 0.9rem; }
+    .btn-approve:hover { filter: brightness(1.1); }
+    .btn-reject  { flex: 1; background: var(--red);   border: none; border-radius: 8px; color: #fff; padding: 9px; font-weight: 700; cursor: pointer; font-size: 0.9rem; }
+    .btn-reject:hover { filter: brightness(1.1); }
+    .btn-remove  { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 9px 14px; cursor: pointer; font-size: 0.85rem; }
+    .btn-remove:hover { border-color: var(--red); color: var(--red); }
+
+    .empty-state { color: var(--muted); text-align: center; padding: 48px 16px; font-size: 0.95rem; }
+
+    /* ─── QR Modal ─── */
+    #qr-modal {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      align-items: center; justify-content: center; z-index: 100; padding: 16px;
+    }
+    #qr-modal.open { display: flex; }
+    #qr-box {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 20px;
+      padding: 28px; max-width: 340px; width: 100%; text-align: center; display: flex;
+      flex-direction: column; align-items: center; gap: 14px;
+    }
+    #qr-box img { border-radius: 10px; background: #fff; padding: 8px; }
+    #qr-url { font-size: 0.85rem; color: var(--muted); word-break: break-all; }
+    #qr-close { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 9px 20px; cursor: pointer; }
+  </style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-screen">
+  <h1>🔒 Moderator Login</h1>
+  <div id="login-box">
+    <input type="password" id="pw-input" placeholder="Password" autocomplete="current-password">
+    <div id="login-error"></div>
+    <button id="login-btn">Sign In</button>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app">
+  <header>
+    <h1>📸 contentServer — Moderator</h1>
+    <div class="header-right">
+      <button id="qr-btn">📱 QR Code</button>
+      <button id="logout-btn">Sign out</button>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="queue">Queue <span class="badge" id="queue-badge">0</span></button>
+    <button class="tab-btn" data-tab="approved">Approved <span class="badge" id="approved-badge">0</span></button>
+  </div>
+
+  <div id="tab-queue" class="tab-pane active">
+    <div id="queue-grid" class="photo-grid"></div>
+  </div>
+  <div id="tab-approved" class="tab-pane">
+    <div id="approved-grid" class="photo-grid"></div>
+  </div>
+</div>
+
+<!-- QR Modal -->
+<div id="qr-modal">
+  <div id="qr-box">
+    <h2>Upload URL</h2>
+    <img id="qr-img" src="" alt="QR Code" width="220" height="220">
+    <p id="qr-url"></p>
+    <button id="qr-close">Close</button>
+  </div>
+</div>
+
+<script>
+  let token = '';
+  let ws = null;
+  let wsReconnectTimer = null;
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  const loginScreen = document.getElementById('login-screen');
+  const appEl = document.getElementById('app');
+  const pwInput = document.getElementById('pw-input');
+  const loginBtn = document.getElementById('login-btn');
+  const loginError = document.getElementById('login-error');
+
+  async function doLogin() {
+    const pw = pwInput.value;
+    try {
+      const res = await fetch('/api/mod/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        token = pw;
+        loginScreen.style.display = 'none';
+        appEl.style.display = 'flex';
+        init();
+      } else {
+        loginError.textContent = data.error || 'Wrong password';
+      }
+    } catch {
+      loginError.textContent = 'Connection error';
+    }
+  }
+
+  loginBtn.addEventListener('click', doLogin);
+  pwInput.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+  document.getElementById('logout-btn').addEventListener('click', () => {
+    token = ''; if (ws) ws.close();
+    appEl.style.display = 'none';
+    loginScreen.style.display = '';
+  });
+
+  // ── API helpers ────────────────────────────────────────────────────────────
+  function modFetch(url, opts = {}) {
+    opts.headers = { ...(opts.headers || {}), 'Authorization': 'Bearer ' + token };
+    return fetch(url, opts);
+  }
+
+  // ── Render helpers ─────────────────────────────────────────────────────────
+  function timeAgo(unixSec) {
+    const diff = Math.floor(Date.now() / 1000) - unixSec;
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+    return `${Math.floor(diff/3600)}h ago`;
+  }
+
+  function makeCard(photo, mode) {
+    const card = document.createElement('div');
+    card.className = 'photo-card';
+    card.dataset.id = photo.id;
+    const name = photo.name || 'Anonymous';
+    const caption = photo.caption || '';
+    card.innerHTML = `
+      <img src="/uploads/${photo.filename}" loading="lazy" alt="">
+      <div class="info">
+        <div class="submitter">${esc(name)}</div>
+        ${caption ? `<div class="caption-text">"${esc(caption)}"</div>` : ''}
+        <div class="time">${timeAgo(photo.created)}</div>
+      </div>
+      <div class="actions">
+        ${mode === 'queue'
+          ? `<button class="btn-approve" data-action="approve" data-id="${photo.id}">✓ Approve</button>
+             <button class="btn-reject"  data-action="reject"  data-id="${photo.id}">✕ Reject</button>`
+          : `<button class="btn-remove"  data-action="remove"  data-id="${photo.id}">Remove from display</button>`
+        }
+      </div>`;
+    return card;
+  }
+
+  function esc(str) { return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  function renderEmpty(container, msg) {
+    container.innerHTML = `<div class="empty-state">${msg}</div>`;
+  }
+
+  // ── Data loading ───────────────────────────────────────────────────────────
+  async function loadQueue() {
+    const res = await modFetch('/api/mod/queue');
+    const photos = await res.json();
+    const grid = document.getElementById('queue-grid');
+    document.getElementById('queue-badge').textContent = photos.length;
+    grid.innerHTML = '';
+    if (!photos.length) { renderEmpty(grid, 'No photos waiting — great!'); return; }
+    photos.forEach(p => grid.appendChild(makeCard(p, 'queue')));
+  }
+
+  async function loadApproved() {
+    const res = await modFetch('/api/mod/approved');
+    const photos = await res.json();
+    const grid = document.getElementById('approved-grid');
+    document.getElementById('approved-badge').textContent = photos.length;
+    grid.innerHTML = '';
+    if (!photos.length) { renderEmpty(grid, 'No approved photos yet.'); return; }
+    photos.forEach(p => grid.appendChild(makeCard(p, 'approved')));
+  }
+
+  // ── Actions (event delegation) ─────────────────────────────────────────────
+  document.addEventListener('click', async e => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn || !token) return;
+    const action = btn.dataset.action;
+    const id = btn.dataset.id;
+    btn.disabled = true;
+
+    if (action === 'approve') {
+      await modFetch(`/api/mod/approve/${id}`, { method: 'POST' });
+      await loadQueue(); await loadApproved();
+    } else if (action === 'reject') {
+      await modFetch(`/api/mod/reject/${id}`, { method: 'POST' });
+      await loadQueue();
+    } else if (action === 'remove') {
+      await modFetch(`/api/mod/remove/${id}`, { method: 'POST' });
+      await loadApproved();
+    }
+    btn.disabled = false;
+  });
+
+  // ── Tabs ───────────────────────────────────────────────────────────────────
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+      if (btn.dataset.tab === 'approved') loadApproved();
+    });
+  });
+
+  // ── QR Code ────────────────────────────────────────────────────────────────
+  document.getElementById('qr-btn').addEventListener('click', async () => {
+    const res = await modFetch('/api/mod/qr');
+    const data = await res.json();
+    document.getElementById('qr-img').src = data.qr;
+    document.getElementById('qr-url').textContent = data.url;
+    document.getElementById('qr-modal').classList.add('open');
+  });
+  document.getElementById('qr-close').addEventListener('click', () => {
+    document.getElementById('qr-modal').classList.remove('open');
+  });
+
+  // ── WebSocket ──────────────────────────────────────────────────────────────
+  function connectWs() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}`);
+    ws.onmessage = e => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'new_upload') {
+        loadQueue();
+      } else if (msg.type === 'approved' || msg.type === 'rejected' || msg.type === 'removed') {
+        loadQueue(); loadApproved();
+      }
+    };
+    ws.onclose = () => {
+      wsReconnectTimer = setTimeout(connectWs, 3000);
+    };
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  function init() {
+    loadQueue();
+    connectWs();
+    // Poll every 15s as fallback
+    setInterval(loadQueue, 15000);
+  }
+</script>
+</body>
+</html>
