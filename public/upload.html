@@ -148,9 +148,16 @@
 </head>
 <body>
   <h1>📸 Share Your Photo</h1>
-  <p class="subtitle">Your photo may appear on the big screen!</p>
+  <p class="subtitle" id="event-subtitle">Your photo may appear on the big screen!</p>
 
-  <div class="card" id="form-card">
+  <!-- Closed state (no active event) -->
+  <div class="card" id="closed-card" style="display:none;text-align:center;gap:12px;padding:32px 16px;">
+    <span style="font-size:3rem">🚫</span>
+    <h2 style="font-size:1.1rem">Uploads are closed right now</h2>
+    <p style="color:var(--muted);font-size:0.9rem">Check back soon — the host hasn't opened this event yet.</p>
+  </div>
+
+  <div class="card" id="form-card" style="display:none">
     <div class="drop-zone" id="drop-zone">
       <input type="file" id="file-input" accept="image/*" capture="environment">
       <span class="icon">🖼️</span>
@@ -192,10 +199,28 @@
     const submitBtn = document.getElementById('submit-btn');
     const statusEl  = document.getElementById('status');
     const formCard  = document.getElementById('form-card');
+    const closedCard = document.getElementById('closed-card');
     const successEl = document.getElementById('success');
     const uploadAnotherBtn = document.getElementById('upload-another');
 
     let selectedFile = null;
+
+    // Check for active event on load
+    (async () => {
+      try {
+        const res = await fetch('/api/event');
+        const { event } = await res.json();
+        if (event) {
+          document.getElementById('event-subtitle').textContent =
+            `Uploading to: ${event.name}${event.date ? ' · ' + event.date : ''}`;
+          formCard.style.display = '';
+        } else {
+          closedCard.style.display = '';
+        }
+      } catch {
+        formCard.style.display = ''; // show form on error, server will reject if truly closed
+      }
+    })();
 
     function setFile(file) {
       if (!file || !file.type.startsWith('image/')) {

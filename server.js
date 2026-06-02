@@ -5,7 +5,6 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { Writable } = require('stream');
 
 const Busboy = require('busboy');
 const Database = require('better-sqlite3');
@@ -28,8 +27,18 @@ fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 // ─── Database ─────────────────────────────────────────────────────────────────
 const db = new Database(DB_PATH);
 db.exec(`
+  CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL,
+    date        TEXT    DEFAULT '',
+    description TEXT    DEFAULT '',
+    active      INTEGER NOT NULL DEFAULT 0,
+    created     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+  );
+
   CREATE TABLE IF NOT EXISTS photos (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER REFERENCES events(id),
     filename TEXT    NOT NULL,
     name     TEXT    DEFAULT '',
     caption  TEXT    DEFAULT '',
@@ -39,14 +48,24 @@ db.exec(`
   );
 `);
 
+// ─── Prepared statements ──────────────────────────────────────────────────────
 const stmts = {
-  insert:        db.prepare('INSERT INTO photos (filename, name, caption, ip) VALUES (?, ?, ?, ?)'),
-  pending:       db.prepare("SELECT * FROM photos WHERE status='pending' ORDER BY created DESC"),
-  approved:      db.prepare("SELECT * FROM photos WHERE status='approved' ORDER BY created DESC"),
-  setStatus:     db.prepare('UPDATE photos SET status=? WHERE id=?'),
-  delete:        db.prepare('DELETE FROM photos WHERE id=?'),
-  getById:       db.prepare('SELECT * FROM photos WHERE id=?'),
-  countByIp:     db.prepare("SELECT COUNT(*) as n FROM photos WHERE ip=? AND created > strftime('%s','now') - 60"),
+  // Events
+  createEvent:      db.prepare('INSERT INTO events (name, date, description) VALUES (?, ?, ?)'),
+  allEvents:        db.prepare('SELECT * FROM events ORDER BY created DESC'),
+  getEvent:         db.prepare('SELECT * FROM events WHERE id=?'),
+  activeEvent:      db.prepare('SELECT * FROM events WHERE active=1 LIMIT 1'),
+  deactivateAll:    db.prepare('UPDATE events SET active=0'),
+  activateEvent:    db.prepare('UPDATE events SET active=1 WHERE id=?'),
+  updateEvent:      db.prepare('UPDATE events SET name=?, date=?, description=? WHERE id=?'),
+
+  // Photos (all scoped to an event_id)
+  insert:           db.prepare('INSERT INTO photos (event_id, filename, name, caption, ip) VALUES (?, ?, ?, ?, ?)'),
+  pendingFor:       db.prepare("SELECT * FROM photos WHERE event_id=? AND status='pending' ORDER BY created DESC"),
+  approvedFor:      db.prepare("SELECT * FROM photos WHERE event_id=? AND status='approved' ORDER BY created DESC"),
+  setStatus:        db.prepare('UPDATE photos SET status=? WHERE id=?'),
+  getById:          db.prepare('SELECT * FROM photos WHERE id=?'),
+  countByIp:        db.prepare("SELECT COUNT(*) as n FROM photos WHERE ip=? AND created > strftime('%s','now') - 60"),
 };
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
@@ -91,7 +110,7 @@ function json(res, status, obj) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', chunk => { body += chunk; if (body.length > 4096) reject(new Error('too large')); });
+    req.on('data', chunk => { body += chunk; if (body.length > 16384) reject(new Error('too large')); });
     req.on('end', () => resolve(body));
     req.on('error', reject);
   });
@@ -100,7 +119,6 @@ function readBody(req) {
 function checkModAuth(req) {
   const auth = req.headers['authorization'] || '';
   if (auth.startsWith('Bearer ')) return auth.slice(7) === MOD_PASSWORD;
-  // cookie fallback
   const cookie = req.headers['cookie'] || '';
   const match = cookie.match(/mod_token=([^;]+)/);
   return match ? match[1] === MOD_PASSWORD : false;
@@ -118,7 +136,6 @@ async function handleRequest(req, res) {
   const pathname = url.pathname;
   const method = req.method.toUpperCase();
 
-  // CORS for same-LAN dev
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
@@ -133,7 +150,7 @@ async function handleRequest(req, res) {
     return serveStatic(res, path.join(PUBLIC_DIR, 'display.html'));
   }
 
-  // ── Static assets (public/) ────────────────────────────────────────────────
+  // ── Static assets ─────────────────────────────────────────────────────────
   if (method === 'GET' && pathname.startsWith('/public/')) {
     const safe = path.normalize(pathname.replace('/public/', ''));
     return serveStatic(res, path.join(PUBLIC_DIR, safe));
@@ -142,15 +159,25 @@ async function handleRequest(req, res) {
   // ── Uploaded images ────────────────────────────────────────────────────────
   if (method === 'GET' && pathname.startsWith('/uploads/')) {
     const safe = path.basename(pathname);
-    const filePath = path.join(UPLOADS_DIR, safe);
-    // Only serve images that exist in DB
-    const row = db.prepare('SELECT id, status FROM photos WHERE filename=?').get(safe);
+    const row = db.prepare('SELECT id FROM photos WHERE filename=?').get(safe);
     if (!row) { res.writeHead(404); res.end(); return; }
-    return serveStatic(res, filePath);
+    return serveStatic(res, path.join(UPLOADS_DIR, safe));
+  }
+
+  // ── Public: active event info (used by upload page) ───────────────────────
+  if (method === 'GET' && pathname === '/api/event') {
+    const event = stmts.activeEvent.get();
+    return json(res, 200, { event: event || null });
   }
 
   // ── POST /api/upload ───────────────────────────────────────────────────────
   if (method === 'POST' && pathname === '/api/upload') {
+    // Check for active event first
+    const activeEvent = stmts.activeEvent.get();
+    if (!activeEvent) {
+      return json(res, 503, { error: 'Uploads are not open right now — no active event. Check back soon!' });
+    }
+
     const ip = getClientIp(req);
     const count = stmts.countByIp.get(ip);
     if (count.n >= RATE_LIMIT) {
@@ -166,7 +193,6 @@ async function handleRequest(req, res) {
     let caption = '';
     let filename = '';
     let fileWritten = false;
-    let bytesReceived = 0;
     let aborted = false;
     let writeStream = null;
 
@@ -180,23 +206,16 @@ async function handleRequest(req, res) {
     bb.on('file', (fieldname, fileStream, info) => {
       const { filename: origName, mimeType } = info;
       if (!mimeType.startsWith('image/')) {
-        aborted = true;
-        fileStream.resume();
-        return;
+        aborted = true; fileStream.resume(); return;
       }
       const ext = path.extname(origName) || '.jpg';
       const safeName = crypto.randomUUID() + ext;
       filename = safeName;
       const dest = path.join(UPLOADS_DIR, safeName);
       writeStream = fs.createWriteStream(dest);
-
-      fileStream.on('data', chunk => { bytesReceived += chunk.length; });
       fileStream.on('limit', () => {
-        aborted = true;
-        writeStream.destroy();
-        fs.unlink(dest, () => {});
+        aborted = true; writeStream.destroy(); fs.unlink(dest, () => {});
       });
-
       fileStream.pipe(writeStream);
       writeStream.on('finish', () => { if (!aborted) fileWritten = true; });
     });
@@ -208,19 +227,18 @@ async function handleRequest(req, res) {
       if (!fileWritten && !filename) {
         return json(res, 400, { error: 'No image received.' });
       }
-      // slight delay to ensure writeStream finishes
       setImmediate(() => {
-        const result = stmts.insert.run(filename, name, caption, ip);
+        // Re-check active event (could have changed during upload)
+        const ev = stmts.activeEvent.get();
+        if (!ev) return json(res, 503, { error: 'Event ended while uploading. Please try again.' });
+        const result = stmts.insert.run(ev.id, filename, name, caption, ip);
         const photo = stmts.getById.get(result.lastInsertRowid);
         broadcast({ type: 'new_upload', photo });
         json(res, 200, { ok: true });
       });
     });
 
-    bb.on('error', err => {
-      json(res, 500, { error: 'Upload error: ' + err.message });
-    });
-
+    bb.on('error', err => json(res, 500, { error: 'Upload error: ' + err.message }));
     req.pipe(bb);
     return;
   }
@@ -243,18 +261,70 @@ async function handleRequest(req, res) {
 
   // ── Mod API (auth required) ────────────────────────────────────────────────
   if (pathname.startsWith('/api/mod/')) {
-    if (!checkModAuth(req)) {
-      return json(res, 401, { error: 'Unauthorized' });
+    if (!checkModAuth(req)) return json(res, 401, { error: 'Unauthorized' });
+
+    // GET /api/mod/events
+    if (method === 'GET' && pathname === '/api/mod/events') {
+      return json(res, 200, stmts.allEvents.all());
     }
 
-    // GET /api/mod/queue – pending photos
+    // POST /api/mod/events  – create new event
+    if (method === 'POST' && pathname === '/api/mod/events') {
+      const body = await readBody(req).catch(() => '{}');
+      const { name, date = '', description = '' } = JSON.parse(body);
+      if (!name || !name.trim()) return json(res, 400, { error: 'Event name is required.' });
+      const result = stmts.createEvent.run(name.trim().slice(0, 100), date.slice(0, 20), description.slice(0, 500));
+      const event = stmts.getEvent.get(result.lastInsertRowid);
+      return json(res, 200, { ok: true, event });
+    }
+
+    // POST /api/mod/events/:id/activate
+    if (method === 'POST' && pathname.match(/^\/api\/mod\/events\/\d+\/activate$/)) {
+      const id = parseInt(pathname.split('/')[4], 10);
+      const event = stmts.getEvent.get(id);
+      if (!event) return json(res, 404, { error: 'Event not found' });
+      db.transaction(() => {
+        stmts.deactivateAll.run();
+        stmts.activateEvent.run(id);
+      })();
+      const updated = stmts.getEvent.get(id);
+      const approved = stmts.approvedFor.all(id);
+      broadcast({ type: 'event_changed', event: updated, photos: approved, slideInterval: SLIDE_INTERVAL });
+      return json(res, 200, { ok: true, event: updated });
+    }
+
+    // POST /api/mod/events/:id/deactivate  – clear active event
+    if (method === 'POST' && pathname.match(/^\/api\/mod\/events\/\d+\/deactivate$/)) {
+      stmts.deactivateAll.run();
+      broadcast({ type: 'event_changed', event: null, photos: [], slideInterval: SLIDE_INTERVAL });
+      return json(res, 200, { ok: true });
+    }
+
+    // PATCH /api/mod/events/:id
+    if (method === 'PATCH' && pathname.match(/^\/api\/mod\/events\/\d+$/)) {
+      const id = parseInt(pathname.split('/').pop(), 10);
+      const body = await readBody(req).catch(() => '{}');
+      const { name, date = '', description = '' } = JSON.parse(body);
+      if (!name || !name.trim()) return json(res, 400, { error: 'Event name is required.' });
+      stmts.updateEvent.run(name.trim().slice(0, 100), date.slice(0, 20), description.slice(0, 500), id);
+      const event = stmts.getEvent.get(id);
+      if (event.active) broadcast({ type: 'event_updated', event });
+      return json(res, 200, { ok: true, event });
+    }
+
+    // ── Photo moderation (all scoped to active event) ──────────────────────
+    const activeEvent = stmts.activeEvent.get();
+
+    // GET /api/mod/queue
     if (method === 'GET' && pathname === '/api/mod/queue') {
-      return json(res, 200, stmts.pending.all());
+      if (!activeEvent) return json(res, 200, []);
+      return json(res, 200, stmts.pendingFor.all(activeEvent.id));
     }
 
-    // GET /api/mod/approved – approved photos
+    // GET /api/mod/approved
     if (method === 'GET' && pathname === '/api/mod/approved') {
-      return json(res, 200, stmts.approved.all());
+      if (!activeEvent) return json(res, 200, []);
+      return json(res, 200, stmts.approvedFor.all(activeEvent.id));
     }
 
     // POST /api/mod/approve/:id
@@ -276,7 +346,7 @@ async function handleRequest(req, res) {
       return json(res, 200, { ok: true });
     }
 
-    // POST /api/mod/remove/:id  (remove from approved pool)
+    // POST /api/mod/remove/:id
     if (method === 'POST' && pathname.startsWith('/api/mod/remove/')) {
       const id = parseInt(pathname.split('/').pop(), 10);
       const photo = stmts.getById.get(id);
@@ -286,7 +356,7 @@ async function handleRequest(req, res) {
       return json(res, 200, { ok: true });
     }
 
-    // GET /api/mod/qr – QR code for upload URL
+    // GET /api/mod/qr
     if (method === 'GET' && pathname === '/api/mod/qr') {
       const uploadUrl = getBaseUrl(req) + '/';
       try {
@@ -306,7 +376,9 @@ async function handleRequest(req, res) {
 
   // ── Public display API ─────────────────────────────────────────────────────
   if (method === 'GET' && pathname === '/api/display/photos') {
-    return json(res, 200, stmts.approved.all());
+    const event = stmts.activeEvent.get();
+    if (!event) return json(res, 200, []);
+    return json(res, 200, stmts.approvedFor.all(event.id));
   }
 
   if (method === 'GET' && pathname === '/api/display/config') {
@@ -326,13 +398,13 @@ const server = http.createServer((req, res) => {
 
 wss = new WebSocketServer({ server });
 wss.on('connection', (ws) => {
-  // Send current approved photos on connect so display page bootstraps
-  const approved = stmts.approved.all();
-  ws.send(JSON.stringify({ type: 'init', photos: approved, slideInterval: SLIDE_INTERVAL }));
+  const event = stmts.activeEvent.get();
+  const photos = event ? stmts.approvedFor.all(event.id) : [];
+  ws.send(JSON.stringify({ type: 'init', event: event || null, photos, slideInterval: SLIDE_INTERVAL }));
 });
 
 server.listen(PORT, () => {
-  console.log(`Photo Wall running on http://localhost:${PORT}`);
+  console.log(`contentServer running on http://localhost:${PORT}`);
   console.log(`  Upload:    http://localhost:${PORT}/`);
   console.log(`  Moderator: http://localhost:${PORT}/mod`);
   console.log(`  Display:   http://localhost:${PORT}/display`);

@@ -198,6 +198,16 @@
         return;
       }
 
+      if (msg.type === 'event_changed') {
+        // Full swap to new event's photo pool
+        photos = msg.photos || [];
+        slideInterval = msg.slideInterval || slideInterval;
+        currentIndex = 0;
+        if (timer) clearInterval(timer);
+        updateDisplay();
+        return;
+      }
+
       if (msg.type === 'approved' && msg.photo) {
         // Add new photo if not already present
         if (!photos.find(p => p.id === msg.photo.id)) {
